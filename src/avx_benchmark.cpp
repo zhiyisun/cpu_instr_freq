@@ -9,9 +9,33 @@
 #include <numeric>
 #include <string>
 #include <cstring>
+#include <sstream>
+#include <mutex>
+#include <iomanip>
 
 // Global variable to control benchmark execution
 std::atomic<bool> g_running(false);
+
+// Mutex for thread-safe console output
+std::mutex g_console_mutex;
+
+// Get the string name of the instruction set
+std::string get_instruction_set_name(InstructionSet instr_set) {
+    switch(instr_set) {
+        case InstructionSet::AVX128:
+            return "AVX128/SSE";
+        case InstructionSet::AVX256:
+            return "AVX256";
+        case InstructionSet::AVX512:
+            return "AVX512";
+        case InstructionSet::AMX:
+            return "AMX";
+        case InstructionSet::BASIC_ADD:
+            return "Basic ADD";
+        default:
+            return "Unknown";
+    }
+}
 
 // Convert string to instruction set enum
 InstructionSet string_to_instruction_set(const std::string& str) {
@@ -273,39 +297,70 @@ void monitor_thread_func(int core_id, std::vector<double>& frequencies) {
     }
 }
 
-// Main benchmark runner function
-void run_benchmark(InstructionSet instr_set, int duration_sec, int core_id) {
+// Print detailed benchmark results
+void print_benchmark_result(const BenchmarkResult& result, const std::string& instr_name) {
+    std::lock_guard<std::mutex> lock(g_console_mutex);
+    
+    std::cout << "\nBenchmark Results for Core " << result.core_id << ":" << std::endl;
+    std::cout << "  Instruction Set: " << instr_name << std::endl;
+    std::cout << "  Frequency Statistics:" << std::endl;
+    std::cout << "    Minimum: " << std::fixed << std::setprecision(2) << result.min_freq << " MHz" << std::endl;
+    std::cout << "    Maximum: " << std::fixed << std::setprecision(2) << result.max_freq << " MHz" << std::endl;
+    std::cout << "    Average: " << std::fixed << std::setprecision(2) << result.avg_freq << " MHz" << std::endl;
+    
+    // Print frequency timeline only if verbose output is needed
+    /*
+    // Print a subset of frequency samples
+    const int max_samples_to_show = 10;
+    std::cout << "\n  Frequency Timeline (samples):" << std::endl;
+    if (result.frequencies.size() <= max_samples_to_show) {
+        // Show all samples
+        for (size_t i = 0; i < result.frequencies.size(); i++) {
+            std::cout << "    " << (i * 100) << "ms: " << result.frequencies[i] << " MHz" << std::endl;
+        }
+    } else {
+        // Show a subset of samples
+        size_t step = result.frequencies.size() / max_samples_to_show;
+        for (size_t i = 0; i < result.frequencies.size(); i += step) {
+            std::cout << "    " << (i * 100) << "ms: " << result.frequencies[i] << " MHz" << std::endl;
+        }
+        // Always show the last sample
+        std::cout << "    " << ((result.frequencies.size() - 1) * 100) << "ms: " 
+                  << result.frequencies[result.frequencies.size() - 1] << " MHz" << std::endl;
+    }
+    */
+}
+
+// Run the benchmark with specified instruction set and return results
+BenchmarkResult run_benchmark_with_result(InstructionSet instr_set, int duration_sec, int core_id) {
+    BenchmarkResult result;
+    result.core_id = core_id;
+    result.success = false;
+    
     // Check if the CPU supports the requested instruction set
     bool supported = true;
-    std::string instr_name;
     
     switch(instr_set) {
         case InstructionSet::AVX128:
             supported = has_sse2();  // Minimum requirement for AVX128 fallback
-            instr_name = "AVX128/SSE";
             break;
         case InstructionSet::AVX256:
             supported = has_avx2();
-            instr_name = "AVX256";
             break;
         case InstructionSet::AVX512:
             supported = has_avx512f();
-            instr_name = "AVX512";
             break;
         case InstructionSet::AMX:
             supported = has_amx();
-            instr_name = "AMX";
             break;
         case InstructionSet::BASIC_ADD:
             supported = true; // Basic integer add is supported on all CPUs
-            instr_name = "Basic ADD";
             break;
     }
     
     if (!supported) {
-        std::cerr << "The CPU does not support " << instr_name << " instructions." << std::endl;
-        std::cerr << "Skipping this benchmark." << std::endl;
-        return;
+        // Don't print anything here, just return the result indicating failure
+        return result;
     }
     
     // Pin to specified core
@@ -313,15 +368,19 @@ void run_benchmark(InstructionSet instr_set, int duration_sec, int core_id) {
     
     // Start the benchmark thread
     g_running = true;
-    std::vector<double> frequencies;
+    result.frequencies.clear();
     
     // Create a monitoring thread
-    std::thread monitor(monitor_thread_func, core_id, std::ref(frequencies));
+    std::thread monitor(monitor_thread_func, core_id, std::ref(result.frequencies));
     
     // Give monitor thread a chance to start
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
-    std::cout << "Running " << instr_name << " benchmark for " << duration_sec << " seconds..." << std::endl;
+    {
+        std::lock_guard<std::mutex> lock(g_console_mutex);
+        std::cout << "Running " << get_instruction_set_name(instr_set) 
+                  << " benchmark on core " << core_id << "..." << std::endl;
+    }
     
     // Start benchmark
     const size_t iterations_per_batch = 10000000; // 10 million iterations per batch
@@ -339,42 +398,51 @@ void run_benchmark(InstructionSet instr_set, int duration_sec, int core_id) {
     }
     
     // Calculate statistics
-    if (frequencies.empty()) {
-        std::cout << "No frequency measurements were taken!" << std::endl;
+    if (result.frequencies.empty()) {
+        return result;  // Return with success = false
+    }
+    
+    result.min_freq = *std::min_element(result.frequencies.begin(), result.frequencies.end());
+    result.max_freq = *std::max_element(result.frequencies.begin(), result.frequencies.end());
+    result.avg_freq = std::accumulate(result.frequencies.begin(), result.frequencies.end(), 0.0) / result.frequencies.size();
+    result.success = true;
+    
+    return result;
+}
+
+// Main benchmark runner function (for backward compatibility)
+void run_benchmark(InstructionSet instr_set, int duration_sec, int core_id) {
+    BenchmarkResult result = run_benchmark_with_result(instr_set, duration_sec, core_id);
+    
+    if (!result.success) {
+        std::string instr_name = get_instruction_set_name(instr_set);
+        
+        std::lock_guard<std::mutex> lock(g_console_mutex);
+        std::cerr << "The CPU does not support " << instr_name << " instructions." << std::endl;
+        std::cerr << "Skipping this benchmark." << std::endl;
         return;
     }
     
-    double min_freq = *std::min_element(frequencies.begin(), frequencies.end());
-    double max_freq = *std::max_element(frequencies.begin(), frequencies.end());
-    double avg_freq = std::accumulate(frequencies.begin(), frequencies.end(), 0.0) / frequencies.size();
+    print_benchmark_result(result, get_instruction_set_name(instr_set));
     
-    // Print results
-    std::cout << "\nBenchmark Results:" << std::endl;
-    std::cout << "  Instruction Set: " << instr_name << std::endl;
-    std::cout << "  Core: " << core_id << std::endl;
-    std::cout << "  Duration: " << duration_sec << " seconds" << std::endl;
-    std::cout << "  Frequency Statistics:" << std::endl;
-    std::cout << "    Minimum: " << min_freq << " MHz" << std::endl;
-    std::cout << "    Maximum: " << max_freq << " MHz" << std::endl;
-    std::cout << "    Average: " << avg_freq << " MHz" << std::endl;
-    
-    // Print all frequency measurements if requested
+    // Print all frequency measurements if requested (legacy detailed output)
+    std::lock_guard<std::mutex> lock(g_console_mutex);
     std::cout << "\n  Frequency Timeline (100ms intervals):" << std::endl;
     const int max_samples_to_show = 50; // Limit the number of samples to show
     
-    if (frequencies.size() <= max_samples_to_show) {
+    if (result.frequencies.size() <= max_samples_to_show) {
         // Show all samples
-        for (size_t i = 0; i < frequencies.size(); i++) {
-            std::cout << "    " << (i * 100) << "ms: " << frequencies[i] << " MHz" << std::endl;
+        for (size_t i = 0; i < result.frequencies.size(); i++) {
+            std::cout << "    " << (i * 100) << "ms: " << result.frequencies[i] << " MHz" << std::endl;
         }
     } else {
         // Show a subset of samples
-        size_t step = frequencies.size() / max_samples_to_show;
-        for (size_t i = 0; i < frequencies.size(); i += step) {
-            std::cout << "    " << (i * 100) << "ms: " << frequencies[i] << " MHz" << std::endl;
+        size_t step = result.frequencies.size() / max_samples_to_show;
+        for (size_t i = 0; i < result.frequencies.size(); i += step) {
+            std::cout << "    " << (i * 100) << "ms: " << result.frequencies[i] << " MHz" << std::endl;
         }
         // Always show the last sample
-        std::cout << "    " << ((frequencies.size() - 1) * 100) << "ms: " 
-                  << frequencies[frequencies.size() - 1] << " MHz" << std::endl;
+        std::cout << "    " << ((result.frequencies.size() - 1) * 100) << "ms: " 
+                  << result.frequencies[result.frequencies.size() - 1] << " MHz" << std::endl;
     }
 }

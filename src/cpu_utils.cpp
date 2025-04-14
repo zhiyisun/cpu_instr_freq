@@ -9,6 +9,9 @@
 #include <string>
 #include <regex>
 #include <pthread.h>
+#include <map>
+#include <mutex>
+#include <functional>
 
 // Use a more cautious approach for cpuid
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
@@ -158,6 +161,82 @@ bool has_amx() {
     return check_cpu_flag("amx_bf16") || check_cpu_flag("amx_tile");
 }
 
+// Collect frequencies from all available cores
+std::map<int, double> get_all_core_frequencies() {
+    std::map<int, double> all_frequencies;
+    int core_count = get_core_count();
+    
+    for (int core_id = 0; core_id < core_count; core_id++) {
+        all_frequencies[core_id] = get_cpu_freq_mhz(core_id);
+    }
+    
+    return all_frequencies;
+}
+
+// Monitor frequencies of all cores over time
+std::map<int, std::vector<double>> monitor_all_cpu_freq(int duration_ms, int sampling_interval_ms) {
+    std::map<int, std::vector<double>> all_frequencies;
+    int core_count = get_core_count();
+    int samples = duration_ms / sampling_interval_ms;
+    
+    for (int i = 0; i < samples; i++) {
+        for (int core_id = 0; core_id < core_count; core_id++) {
+            double freq = get_cpu_freq_mhz(core_id);
+            all_frequencies[core_id].push_back(freq);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(sampling_interval_ms));
+    }
+    
+    return all_frequencies;
+}
+
+// Run a function on a specific core
+void run_on_core(int core_id, const std::function<void()>& func) {
+    std::thread t([core_id, &func]() {
+        pin_to_core(core_id);
+        func();
+    });
+    
+    t.join();
+}
+
+// Run a function on all cores in parallel
+void run_on_all_cores(const std::function<void()>& func) {
+    int core_count = get_core_count();
+    std::vector<std::thread> threads;
+    
+    for (int core_id = 0; core_id < core_count; core_id++) {
+        threads.emplace_back([core_id, &func]() {
+            pin_to_core(core_id);
+            func();
+        });
+    }
+    
+    for (auto& t : threads) {
+        t.join();
+    }
+}
+
+// Run a function on all cores sequentially
+void run_on_all_cores_sequential(const std::function<void(int)>& func) {
+    int core_count = get_core_count();
+    
+    for (int core_id = 0; core_id < core_count; core_id++) {
+        run_on_core(core_id, [core_id, &func]() {
+            func(core_id);
+        });
+    }
+}
+
+void print_all_core_frequencies() {
+    std::map<int, double> frequencies = get_all_core_frequencies();
+    
+    std::cout << "CPU Frequencies for All Cores:" << std::endl;
+    for (const auto& [core_id, freq] : frequencies) {
+        std::cout << "  Core " << core_id << ": " << freq << " MHz" << std::endl;
+    }
+}
+
 void print_cpu_info() {
     // Get CPU name
     std::string cpu_name = "Unknown";
@@ -184,6 +263,41 @@ void print_cpu_info() {
     std::cout << "    AVX512F: " << (has_avx512f() ? "Yes" : "No") << std::endl;
     std::cout << "    AMX:     " << (has_amx() ? "Yes" : "No") << std::endl;
     
-    // Print frequency of core 0 as an example
-    std::cout << "  Current frequency of core 0: " << get_cpu_freq_mhz(0) << " MHz" << std::endl;
+    // Print frequencies of all cores
+    std::cout << "\n  Core Frequencies:" << std::endl;
+    std::map<int, double> frequencies = get_all_core_frequencies();
+    for (const auto& [core_id, freq] : frequencies) {
+        std::cout << "    Core " << core_id << ": " << freq << " MHz" << std::endl;
+    }
+}
+
+void print_single_core_info(int core_id) {
+    // Get CPU name
+    std::string cpu_name = "Unknown";
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    std::string line;
+    
+    while (std::getline(cpuinfo, line)) {
+        if (line.find("model name") != std::string::npos) {
+            cpu_name = line.substr(line.find(":") + 1);
+            // Trim leading whitespace
+            cpu_name.erase(0, cpu_name.find_first_not_of(" \t"));
+            break;
+        }
+    }
+    
+    std::cout << "CPU Information:" << std::endl;
+    std::cout << "  Model: " << cpu_name << std::endl;
+    std::cout << "  Cores: " << get_core_count() << std::endl;
+    std::cout << "  Instruction Set Support:" << std::endl;
+    std::cout << "    SSE:     " << (has_sse() ? "Yes" : "No") << std::endl;
+    std::cout << "    SSE2:    " << (has_sse2() ? "Yes" : "No") << std::endl;
+    std::cout << "    AVX:     " << (has_avx() ? "Yes" : "No") << std::endl;
+    std::cout << "    AVX2:    " << (has_avx2() ? "Yes" : "No") << std::endl;
+    std::cout << "    AVX512F: " << (has_avx512f() ? "Yes" : "No") << std::endl;
+    std::cout << "    AMX:     " << (has_amx() ? "Yes" : "No") << std::endl;
+    
+    // Print frequency only for the selected core
+    double freq = get_cpu_freq_mhz(core_id);
+    std::cout << "\n  Core " << core_id << " Frequency: " << freq << " MHz" << std::endl;
 }
