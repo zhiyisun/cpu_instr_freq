@@ -42,7 +42,7 @@ usage() {
 # Parse command line options
 RUN_SINGLE=true
 RUN_PARALLEL=true
-RUN_SEQUENTIAL=true
+RUN_SEQUENTIAL=false
 SPECIFIC_CORE=""
 SPECIFIC_INSTR=""
 
@@ -89,7 +89,7 @@ while [[ $# -gt 0 ]]; do
     -a|--all)
       RUN_SINGLE=true
       RUN_PARALLEL=true
-      RUN_SEQUENTIAL=true
+      RUN_SEQUENTIAL=false
       shift
       ;;
     *)
