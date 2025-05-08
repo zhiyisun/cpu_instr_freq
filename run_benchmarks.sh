@@ -5,7 +5,7 @@
 
 # Default settings
 BINARY="./build/cpu_instr_freq"
-DURATION=3  # Default benchmark duration in seconds
+DURATION=10  # Default benchmark duration in seconds
 OUTPUT_DIR="./benchmark_results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
